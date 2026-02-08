@@ -1,0 +1,62 @@
+#include <windows.h>
+#include <stdio.h>
+#include <sddl.h>
+
+// This function removes the "No-Write-Up" policy from the process token
+BOOL AllowLowerIntegrityWrite(HANDLE hProcess) {
+    HANDLE hToken;
+    // S:(ML;;;;;HI) -> Mandatory Label, High Integrity, but NO policy flags (like NW)
+    // This allows processes with lower integrity to bypass the "No-Write-Up" check.
+    PCWSTR highIntegrityNoPolicySid = L"S:(ML;;;;;HI)"; 
+    PSECURITY_DESCRIPTOR pSD = NULL;
+
+    if (!OpenProcessToken(hProcess, WRITE_OWNER | READ_CONTROL, &hToken)) {
+        printf("[-] OpenProcessToken failed: %d\n", GetLastError());
+        return FALSE;
+    }
+
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(highIntegrityNoPolicySid, SDDL_REVISION_1, &pSD, NULL)) {
+        if (SetKernelObjectSecurity(hToken, LABEL_SECURITY_INFORMATION, pSD)) {
+            printf("[+] Mandatory Label Policy set to allow Write-Up.\n");
+            LocalFree(pSD);
+            CloseHandle(hToken);
+            return TRUE;
+        }
+        LocalFree(pSD);
+    }
+    
+    printf("[-] SetKernelObjectSecurity failed: %d\n", GetLastError());
+    CloseHandle(hToken);
+    return FALSE;
+}
+
+int main() {
+    HANDLE hProcess = GetCurrentProcess();
+
+    // 1. Set NULL DACL (Allow all Users/SIDs)
+    SECURITY_DESCRIPTOR sd;
+    InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
+    SetSecurityDescriptorDacl(&sd, TRUE, NULL, FALSE);
+    
+    if (SetKernelObjectSecurity(hProcess, DACL_SECURITY_INFORMATION, &sd)) {
+        printf("[+] DACL set to NULL (Everyone allowed).\n");
+    } else {
+        printf("[-] Failed to set DACL: %d\n", GetLastError());
+        return 1;
+    }
+
+    // 2. Remove the "No-Write-Up" Integrity Policy
+    if (!AllowLowerIntegrityWrite(hProcess)) {
+        printf("[-] Failed to modify Integrity Policy. Are you running as Admin?\n");
+        return 1;
+    }
+
+    printf("\n[SUCCESS] Dummy is running as HIGH INTEGRITY.\n");
+    printf("[SUCCESS] MIC 'No-Write-Up' is disabled for this PID: %d\n", GetCurrentProcessId());
+    printf("[!] You can now inject from a standard User process.\n\n");
+    
+    printf("Press Enter to close dummy...");
+    getchar();
+
+    return 0;
+}
